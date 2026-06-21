@@ -15,14 +15,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mail-bot")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="Run the Telegram bot")
+    subparsers.add_parser("web", help="Run the Kanban web server")
     subparsers.add_parser("auth-gmail", help="Run Gmail OAuth bootstrap")
     subparsers.add_parser("init-db", help="Initialize SQLite schema")
     subparsers.add_parser("poll-once", help="Run one Gmail poll without starting Telegram polling")
+    subparsers.add_parser(
+        "backfill-events", help="Aggregate already-processed emails into Kanban events"
+    )
 
     args = parser.parse_args(argv)
     require_runtime = args.command in {"run", "poll-once"}
     settings = Settings.from_env(require_runtime=require_runtime)
     configure_logging(settings.log_level)
+
+    if args.command == "web":
+        return _run_web(settings)
 
     if args.command == "auth-gmail":
         run_oauth(settings)
@@ -33,12 +40,37 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "poll-once":
         return asyncio.run(_poll_once(settings))
+    if args.command == "backfill-events":
+        return asyncio.run(_backfill_events(settings))
     if args.command == "run":
         application = build_application(settings)
         application.run_polling(allowed_updates=UpdateTypes.ALL)
         return 0
     parser.error("unknown command")
     return 2
+
+
+def _run_web(settings: Settings) -> int:
+    import uvicorn
+
+    from mail_bot.webapp import build_web_app
+
+    settings.validate_web()
+    app = build_web_app(settings)
+    uvicorn.run(app, host="0.0.0.0", port=settings.web_port, log_level=settings.log_level.lower())
+    return 0
+
+
+async def _backfill_events(settings: Settings) -> int:
+    from mail_bot.db import Database
+    from mail_bot.llm import LLMClient
+    from mail_bot.service import backfill_events
+
+    db = Database(settings.sqlite_path)
+    db.init()
+    count = await backfill_events(db=db, llm=LLMClient(settings), settings=settings)
+    print(f"Backfilled {count} emails into events.")
+    return 0
 
 
 async def _poll_once(settings: Settings) -> int:

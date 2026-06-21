@@ -50,6 +50,14 @@ class EventSummary:
     importance: int
     email_count: int
     last_activity_at: datetime
+    priority: str = "P1"
+    status: str = "todo"
+    last_update_zh: str = ""
+    sort_order: float = 0.0
+    archived_at: datetime | None = None
+    title_overridden: bool = False
+    context_overridden: bool = False
+    priority_overridden: bool = False
 
 
 @dataclass(frozen=True)

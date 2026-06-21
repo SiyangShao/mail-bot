@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block nav %}
+  {% if show_hidden %}
+    <a href="/">隐藏已归档</a>
+  {% else %}
+    <a href="/?show_hidden=1">显示已归档</a>
+  {% endif %}
+  <form method="post" action="/logout" class="inline"><button type="submit" class="link">登出</button></form>
+{% endblock %}
+{% block content %}
+<div class="board">
+  {% for col in columns %}
+  <section class="column" data-status="{{ col.key }}">
+    <h2 class="column-title">{{ col.label }} <span class="count">{{ col.events|length }}</span></h2>
+    <div class="dropzone" data-status="{{ col.key }}">
+      {% for ev in col.events %}
+      <article class="card prio-{{ ev.priority }}{% if ev.archived %} archived{% endif %}"
+               draggable="true" data-id="{{ ev.id }}">
+        <div class="card-top">
+          <span class="badge prio">{{ ev.priority }}</span>
+          <span class="badge cat">{{ ev.category }}</span>
+          <span class="badge imp">重要性 {{ ev.importance }}/5</span>
+          {% if ev.archived %}<span class="badge arch">已归档</span>{% endif %}
+        </div>
+        <a class="card-title" href="/event/{{ ev.id }}">{{ ev.title_zh }}</a>
+        <p class="card-context">{{ ev.context_zh }}</p>
+        {% if ev.last_update_zh %}<p class="card-update">最近更新：{{ ev.last_update_zh }}</p>{% endif %}
+        <div class="card-meta">
+          <span>{{ ev.email_count }} 封邮件</span>
+          <span>{{ ev.last_activity_at|dt }}</span>
+        </div>
+        <div class="card-actions">
+          <span class="prio-set" data-id="{{ ev.id }}">
+            {% for p in priorities %}
+            <button class="pbtn{% if p == ev.priority %} on{% endif %}" data-prio="{{ p }}">{{ p }}</button>
+            {% endfor %}
+          </span>
+          <button class="archive-btn" data-id="{{ ev.id }}"
+                  data-archived="{{ 'true' if ev.archived else 'false' }}">
+            {{ '取消归档' if ev.archived else '归档' }}
+          </button>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

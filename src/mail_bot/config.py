@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from mail_bot.models import priority_for_importance
+
 
 def _env(name: str, default: str | None = None) -> str | None:
     value = os.getenv(name)
@@ -84,6 +86,17 @@ class Settings:
     event_window_days: int
     event_match_max_open: int
 
+    # Defaulted fields (kept last so the dataclass stays valid).
+    event_create_importance_min: int = 3
+    priority_p0_importance_min: int = 5
+    priority_p1_importance_min: int = 4
+    done_auto_hide_days: int = 30
+    web_password: str | None = None
+    web_session_secret: str | None = None
+    web_port: int = 8000
+    cf_access_team_domain: str | None = None
+    cf_access_aud: str | None = None
+
     @classmethod
     def from_env(cls, *, require_runtime: bool = True) -> Settings:
         data_dir = Path(_env("DATA_DIR", "data") or "data")
@@ -124,6 +137,15 @@ class Settings:
             email_retry_max_backoff_seconds=_int_env("EMAIL_RETRY_MAX_BACKOFF_SECONDS", 3600),
             event_window_days=_int_env("EVENT_WINDOW_DAYS", 7),
             event_match_max_open=_int_env("EVENT_MATCH_MAX_OPEN", 12),
+            event_create_importance_min=_int_env("EVENT_CREATE_IMPORTANCE_MIN", 3),
+            priority_p0_importance_min=_int_env("PRIORITY_P0_IMPORTANCE_MIN", 5),
+            priority_p1_importance_min=_int_env("PRIORITY_P1_IMPORTANCE_MIN", 4),
+            done_auto_hide_days=_int_env("DONE_AUTO_HIDE_DAYS", 30),
+            web_password=_env("WEB_PASSWORD"),
+            web_session_secret=_env("WEB_SESSION_SECRET"),
+            web_port=_int_env("WEB_PORT", 8000),
+            cf_access_team_domain=_env("CF_ACCESS_TEAM_DOMAIN"),
+            cf_access_aud=_env("CF_ACCESS_AUD"),
         )
         settings.validate_common()
         if require_runtime:
@@ -151,6 +173,16 @@ class Settings:
             raise ValueError("EVENT_WINDOW_DAYS must be >= 1")
         if self.event_match_max_open < 1:
             raise ValueError("EVENT_MATCH_MAX_OPEN must be >= 1")
+        if not (1 <= self.event_create_importance_min <= 5):
+            raise ValueError("EVENT_CREATE_IMPORTANCE_MIN must be in 1..5")
+        if not (1 <= self.priority_p1_importance_min <= self.priority_p0_importance_min <= 5):
+            raise ValueError(
+                "PRIORITY_*_IMPORTANCE_MIN must satisfy 1 <= P1_MIN <= P0_MIN <= 5"
+            )
+        if self.done_auto_hide_days < 1:
+            raise ValueError("DONE_AUTO_HIDE_DAYS must be >= 1")
+        if not (1 <= self.web_port <= 65535):
+            raise ValueError("WEB_PORT must be in 1..65535")
         self.local_timezone()
         self.daily_time_parts()
 
@@ -171,6 +203,22 @@ class Settings:
                 f"Gmail OAuth token not found at {self.google_token_path}. "
                 "Run `mail-bot auth-gmail` first."
             )
+
+    def validate_web(self) -> None:
+        missing = []
+        if not self.web_password:
+            missing.append("WEB_PASSWORD")
+        if not self.web_session_secret:
+            missing.append("WEB_SESSION_SECRET")
+        if missing:
+            raise ValueError("Missing required environment variables: " + ", ".join(missing))
+
+    def priority_for_importance(self, importance: int) -> str:
+        return priority_for_importance(
+            importance,
+            p0_min=self.priority_p0_importance_min,
+            p1_min=self.priority_p1_importance_min,
+        )
 
     def local_timezone(self) -> ZoneInfo:
         try:

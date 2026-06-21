@@ -15,3 +15,38 @@ services:
       - ./secrets:/app/secrets:ro
     ports:
       - "${GMAIL_OAUTH_PORT:-8080}:${GMAIL_OAUTH_PORT:-8080}"
+
+  web:
+    build: .
+    restart: unless-stopped
+    profiles: ["kanban"]
+    command: ["uv", "run", "--no-dev", "--frozen", "mail-bot", "web"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      SQLITE_PATH: /app/data/mail_bot.sqlite3
+      WEB_PORT: "8000"
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Named tunnel + token. Configure the public hostname -> http://web:8000 in the
+  # Cloudflare Zero Trust dashboard (tunnel ingress). Add Cloudflare Access there too.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["kanban"]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - web

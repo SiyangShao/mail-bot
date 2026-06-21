@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}mail-bot 看板{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">📬 邮件事件看板</a>
+    <nav class="topnav">{% block nav %}{% endblock %}</nav>
+  </header>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

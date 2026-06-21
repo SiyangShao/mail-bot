@@ -9,7 +9,13 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from mail_bot.config import Settings
-from mail_bot.models import DailySummaryOutput, EmailAnalysis, EventMatch, KeyDate
+from mail_bot.models import (
+    DailySummaryOutput,
+    EmailAnalysis,
+    EventAggregation,
+    EventMatch,
+    KeyDate,
+)
 from mail_bot.records import AnalyzedEmail, EventSummary
 
 LOGGER = logging.getLogger(__name__)
@@ -135,12 +141,47 @@ class LLMClient:
             max_tokens=900,
         )
 
+    async def reaggregate_event(self, emails: list[AnalyzedEmail]) -> EventAggregation:
+        payload = [
+            {
+                "subject_redacted": item.sanitized_subject,
+                "from_domain": item.from_domain,
+                "received_at": item.received_at.isoformat(),
+                "importance": item.analysis.importance,
+                "summary_zh": item.analysis.summary_zh,
+                "action_items": item.analysis.action_items,
+                "key_dates": [date.model_dump() for date in item.analysis.key_dates],
+            }
+            for item in emails
+        ]
+        max_importance = max((item.analysis.importance for item in emails), default=3)
+        fallback_title = (emails[0].subject if emails else "未命名事件").strip() or "未命名事件"
+        fallback_context = (emails[0].analysis.summary_zh if emails else "").strip()
+        system = _reaggregate_system_prompt()
+        user = (
+            "下面是同一个事件下的全部脱敏邮件分析（JSON 数组，按时间从旧到新）。"
+            "请把它们重新归并成一个连贯的事件并输出 JSON。\n\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        return await self._request_validated(
+            system=system,
+            user=user,
+            validator=EventAggregation,
+            fallback=lambda reason: EventAggregation.fallback(
+                fallback_title, fallback_context, importance=max_importance
+            ),
+            max_tokens=900,
+        )
+
     async def _request_validated(
         self,
         *,
         system: str,
         user: str,
-        validator: type[EmailAnalysis] | type[DailySummaryOutput] | type[EventMatch],
+        validator: type[EmailAnalysis]
+        | type[DailySummaryOutput]
+        | type[EventMatch]
+        | type[EventAggregation],
         fallback,
         max_tokens: int,
     ):
@@ -313,6 +354,23 @@ JSON schema:
 }
 
 事件按 importance 从高到低排序。
+""".strip()
+
+
+def _reaggregate_system_prompt() -> str:
+    return """
+你负责把同一个事件下的多封邮件重新归并成一个连贯的事件描述。输入是这些邮件的脱敏分析（JSON 数组）。
+注意：这些邮件是人工指定属于同一事件的，请把它们当作一件事来总结，不要再拆分。
+
+请只输出一个合法 JSON object，不要 Markdown，不要解释。输出必须使用简体中文。
+
+JSON schema:
+{
+  "title_zh": "事件简短标题",
+  "context_zh": "综合全部邮件的事件背景 + 最新进展，2-4 句",
+  "category": "账单/安全/工作/旅行/购物/社交/通知/其他 等短分类",
+  "importance": 1-5 的整数，取事件整体的最高重要性
+}
 """.strip()
 
 

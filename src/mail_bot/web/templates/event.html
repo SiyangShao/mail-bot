@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}事件详情 · mail-bot 看板{% endblock %}
+{% block nav %}<a href="/">← 返回看板</a>{% endblock %}
+{% block content %}
+{% if event is none %}
+  <p class="error">事件不存在或已被合并。</p>
+{% else %}
+<div class="detail">
+  <div class="detail-main">
+    <div class="card-top">
+      <span class="badge prio prio-{{ event.priority }}">{{ event.priority_label }}</span>
+      <span class="badge cat">{{ event.category }}</span>
+      <span class="badge imp">重要性 {{ event.importance }}/5</span>
+      <span class="badge">{{ event.email_count }} 封邮件</span>
+      {% if event.archived %}<span class="badge arch">已归档</span>{% endif %}
+    </div>
+    <h1>{{ event.title_zh }}</h1>
+    {% if event.last_update_zh %}<p class="card-update">最近更新：{{ event.last_update_zh }}</p>{% endif %}
+    <p class="muted">最近活动：{{ event.last_activity_at|dt }}</p>
+
+    <form method="post" action="/event/{{ event.id }}" class="edit-form">
+      <label>标题<input type="text" name="title_zh" value="{{ event.title_zh }}"></label>
+      <label>概要<textarea name="context_zh" rows="4">{{ event.context_zh }}</textarea></label>
+      <div class="row">
+        <label>优先级
+          <select name="priority">
+            {% for p in priorities %}
+            <option value="{{ p }}"{% if p == event.priority %} selected{% endif %}>{{ priority_labels[p] }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>分类<input type="text" name="category" value="{{ event.category }}"></label>
+      </div>
+      <button type="submit">保存编辑</button>
+      <span class="muted small">手动编辑后，LLM 自动聚合不再覆盖该字段。</span>
+    </form>
+
+    <div class="tools">
+      <button id="reaggregate" data-id="{{ event.id }}">用 LLM 重新归并本事件</button>
+      <button class="archive-btn" data-id="{{ event.id }}"
+              data-archived="{{ 'true' if event.archived else 'false' }}">
+        {{ '取消归档' if event.archived else '归档' }}
+      </button>
+    </div>
+
+    {% if others %}
+    <div class="tools merge-tools">
+      <h3>合并其他事件到本事件</h3>
+      <div class="merge-list">
+        {% for o in others %}
+        <label><input type="checkbox" class="merge-src" value="{{ o.id }}"> #{{ o.id }} {{ o.title_zh }}</label>
+        {% endfor %}
+      </div>
+      <button id="merge" data-id="{{ event.id }}">合并所选事件</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <aside class="detail-emails">
+    <h3>来源邮件（{{ emails|length }}）</h3>
+    {% for m in emails %}
+    <div class="email-item" data-id="{{ m.email_id }}">
+      <div class="email-head">
+        <strong>{{ m.subject }}</strong>
+        <span class="badge imp">{{ m.importance }}/5</span>
+      </div>
+      <div class="muted small">{{ m.from_domain }} · {{ m.received_at|dt }}</div>
+      <p>{{ m.summary_zh }}</p>
+      <div class="email-actions">
+        <button class="split-btn" data-id="{{ m.email_id }}">拆分成新事件</button>
+        {% if others %}
+        <select class="move-target">
+          <option value="">移到事件…</option>
+          {% for o in others %}<option value="{{ o.id }}">#{{ o.id }} {{ o.title_zh }}</option>{% endfor %}
+        </select>
+        <button class="move-btn" data-id="{{ m.email_id }}">移动</button>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </aside>
+</div>
+{% endif %}
+{% endblock %}

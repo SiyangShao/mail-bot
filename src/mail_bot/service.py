@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from mail_bot.config import Settings
 from mail_bot.db import Database
@@ -43,6 +43,14 @@ class DiscoveredMessages:
     ids: list[str]
     next_history_id: str | None = None
     suppress_immediate: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedEvent:
+    match: EventMatch
+    event_id: int
+    priority: str
+    is_new: bool
 
 
 class TelegramSender:
@@ -156,7 +164,7 @@ class MailBotService:
                 analysis=analysis,
                 suppress_immediate=stored.suppress_immediate,
             )
-            await self._maybe_send_immediate(analyzed)
+            await self._ingest_and_maybe_notify(analyzed)
             return "processed"
         except Exception as exc:
             self.db.mark_email_retry(
@@ -292,31 +300,42 @@ class MailBotService:
         )
         return self.db.upsert_email(record)
 
-    async def _maybe_send_immediate(self, item: AnalyzedEmail) -> None:
+    async def _ingest_and_maybe_notify(self, item: AnalyzedEmail) -> None:
+        analysis = item.analysis
+        if analysis.importance < self.settings.event_create_importance_min:
+            return
+        # Idempotency: if a prior (possibly failed) attempt already linked this email to
+        # an event, don't resolve again — avoids duplicate events / double counting.
+        # Semantics: event creation is durable/idempotent, the immediate Telegram alert is
+        # best-effort. If a crash lands between linking and sending, we skip the re-send
+        # here; the 09:00 daily summary still covers the email by received_at as a backstop.
+        if self.db.email_has_event(item.email_id):
+            return
+        # Always create/link the event so the Kanban reflects every important email,
+        # including backfill / history-expired re-sync. Only the Telegram send is gated.
+        resolved = await self._resolve_event(item)
         if item.suppress_immediate:
             return
-        analysis = item.analysis
-        if analysis.importance < self.settings.urgent_importance_min:
-            return
-        if analysis.information_density < self.settings.urgent_info_density_min:
+        # Notification routing by the event's priority: P0 alerts, P1 silent, P2 nothing.
+        if resolved.priority == "P2":
             return
         if self.db.has_notification(email_id=item.email_id, notification_type="immediate"):
             return
-        match = await self._resolve_event(item)
-        is_new_event = match.matched_event_id is None
+        disable_notification = resolved.priority != "P0"
+        match = resolved.match
         text = format_immediate_email(
             item,
             event_title=match.title_zh,
             event_context=match.context_zh,
             update_note=match.update_note_zh,
-            is_new_event=is_new_event,
+            is_new_event=resolved.is_new,
         )
         try:
-            message_ids = await self.telegram.send(text, disable_notification=True)
+            message_ids = await self.telegram.send(text, disable_notification=disable_notification)
             self.db.record_notification(
                 notification_type="immediate",
                 email_id=item.email_id,
-                disable_notification=True,
+                disable_notification=disable_notification,
                 telegram_message_ids=message_ids,
                 status="sent",
             )
@@ -325,50 +344,160 @@ class MailBotService:
             self.db.record_notification(
                 notification_type="immediate",
                 email_id=item.email_id,
-                disable_notification=True,
+                disable_notification=disable_notification,
                 telegram_message_ids=[],
                 status="error",
                 error=str(exc),
             )
 
-    async def _resolve_event(self, item: AnalyzedEmail) -> EventMatch:
-        analysis = item.analysis
-        open_events = self.db.list_open_events(
-            within_days=self.settings.event_window_days,
-            limit=self.settings.event_match_max_open,
+    async def _resolve_event(self, item: AnalyzedEmail) -> ResolvedEvent:
+        return await resolve_event_for(
+            db=self.db,
+            llm=self.llm,
+            settings=self.settings,
+            item=item,
+            now=item.received_at if item.suppress_immediate else None,
         )
-        match = await self.llm.resolve_event(
-            subject=item.sanitized_subject,
-            from_domain=item.from_domain,
-            received_at=item.received_at.isoformat(),
-            summary_zh=analysis.summary_zh,
-            action_items=analysis.action_items,
-            key_dates=analysis.key_dates,
-            importance=analysis.importance,
-            open_events=open_events,
+
+
+async def resolve_event_for(
+    *,
+    db: Database,
+    llm: LLMClient,
+    settings: Settings,
+    item: AnalyzedEmail,
+    reopen: bool = True,
+    now: datetime | None = None,
+) -> ResolvedEvent:
+    """Match an analyzed email to an existing event or create a new one, and link it.
+
+    Shared by the live ingest path and the one-time backfill command. `reopen` controls
+    whether matching a done/archived event moves it back to 待处理 — true for live mail,
+    false for backfill (a historical email must not change the current board lifecycle).
+    `now` is the reference time for the candidate window: live mail uses utc_now(), while
+    historical/suppressed paths pass the email's received_at so old emails can still match
+    contemporaneous history.
+    """
+    analysis = item.analysis
+    # Candidates: recent active events, plus done/archived events still on the board
+    # (within the auto-hide window) so they can be reopened.
+    open_events = db.list_event_match_candidates(
+        open_within_days=settings.event_window_days,
+        reopen_within_days=settings.done_auto_hide_days,
+        limit=settings.event_match_max_open,
+        now=now,
+    )
+    match = await llm.resolve_event(
+        subject=item.sanitized_subject,
+        from_domain=item.from_domain,
+        received_at=item.received_at.isoformat(),
+        summary_zh=analysis.summary_zh,
+        action_items=analysis.action_items,
+        key_dates=analysis.key_dates,
+        importance=analysis.importance,
+        open_events=open_events,
+    )
+    valid_ids = {event.id for event in open_events}
+    matched_id = match.matched_event_id if match.matched_event_id in valid_ids else None
+    # The event match is a second LLM pass; never let it downgrade the email's own
+    # analyzed importance (which would silently mute a genuinely urgent email).
+    event_importance = max(analysis.importance, match.importance)
+    mapped_priority = settings.priority_for_importance(event_importance)
+    if matched_id is not None:
+        db.update_event(
+            matched_id,
+            title_zh=match.title_zh,
+            context_zh=match.context_zh,
+            category=match.category,
+            importance=event_importance,
+            last_activity_at=item.received_at,
+            mapped_priority=mapped_priority,
+            update_note_zh=match.update_note_zh,
+            reopen=reopen,
+            link_email_id=item.email_id,
         )
-        valid_ids = {event.id for event in open_events}
-        matched_id = match.matched_event_id if match.matched_event_id in valid_ids else None
-        if matched_id is not None:
-            self.db.update_event(
-                matched_id,
-                title_zh=match.title_zh,
-                context_zh=match.context_zh,
-                category=match.category,
-                importance=match.importance,
-                last_activity_at=item.received_at,
-            )
-            event_id = matched_id
-        else:
-            event_id = self.db.create_event(
-                title_zh=match.title_zh,
-                context_zh=match.context_zh,
-                category=match.category,
-                importance=match.importance,
-                last_activity_at=item.received_at,
-            )
-        self.db.link_email_event(item.email_id, event_id)
-        return match.model_copy(update={"matched_event_id": matched_id})
+        event = db.get_event(matched_id)
+        priority = event.priority if event else mapped_priority
+        event_id = matched_id
+        is_new = False
+    else:
+        event_id = db.create_event(
+            title_zh=match.title_zh,
+            context_zh=match.context_zh,
+            category=match.category,
+            importance=event_importance,
+            last_activity_at=item.received_at,
+            priority=mapped_priority,
+            last_update_zh=match.update_note_zh,
+            link_email_id=item.email_id,
+        )
+        priority = mapped_priority
+        is_new = True
+    return ResolvedEvent(
+        match=match.model_copy(update={"matched_event_id": matched_id}),
+        event_id=event_id,
+        priority=priority,
+        is_new=is_new,
+    )
+
+
+async def backfill_events(
+    *,
+    db: Database,
+    llm: LLMClient,
+    settings: Settings,
+    limit: int = 1000,
+) -> int:
+    """Aggregate already-processed emails that predate the event model into events.
+
+    Processes them in chronological order (so aggregation builds up naturally) and never
+    sends notifications. Returns the number of emails newly attached to an event.
+    """
+    items = db.list_unlinked_processed(
+        min_importance=settings.event_create_importance_min, limit=limit
+    )
+    count = 0
+    for item in items:
+        if db.email_has_event(item.email_id):
+            continue
+        # Backfill is historical: never reopen a done/archived event, and evaluate the
+        # candidate window relative to the email's own time so same-event old mail merges.
+        await resolve_event_for(
+            db=db,
+            llm=llm,
+            settings=settings,
+            item=item,
+            reopen=False,
+            now=item.received_at,
+        )
+        count += 1
+    return count
+
+
+async def reaggregate_event(
+    *,
+    db: Database,
+    llm: LLMClient,
+    settings: Settings,
+    event_id: int,
+) -> bool:
+    """Re-run the LLM over an event's source emails and rewrite its title/context/priority.
+
+    Manual web action to fix LLM aggregation. Returns False if the event has no emails.
+    """
+    emails = db.list_emails_for_event(event_id)
+    if not emails:
+        return False
+    aggregation = await llm.reaggregate_event(emails)
+    db.apply_reaggregation(
+        event_id,
+        title_zh=aggregation.title_zh,
+        context_zh=aggregation.context_zh,
+        category=aggregation.category,
+        importance=aggregation.importance,
+        priority=settings.priority_for_importance(aggregation.importance),
+    )
+    return True
 
 
 def _events_from_emails(emails: list[AnalyzedEmail]) -> list[DailyEvent]:
