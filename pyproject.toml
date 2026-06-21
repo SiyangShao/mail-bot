@@ -1,0 +1,51 @@
+[project]
+name = "mail-bot"
+version = "0.1.0"
+description = "Dockerized Telegram bot that ingests Gmail, redacts PII, analyzes email with an OpenAI-compatible LLM, and stores results in SQLite."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.12.3",
+    "google-api-python-client>=2.170.0",
+    "google-auth>=2.40.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.2",
+    "openai>=1.82.0",
+    "pydantic>=2.11.0",
+    "python-telegram-bot[job-queue]>=22.0",
+]
+
+[project.optional-dependencies]
+pii = [
+    "presidio-analyzer>=2.2.358",
+    "presidio-anonymizer>=2.2.358",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "ruff>=0.11.0",
+]
+
+[project.scripts]
+mail-bot = "mail_bot.__main__:main"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

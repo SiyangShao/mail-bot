@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      GOOGLE_CREDENTIALS_PATH: /app/secrets/google_credentials.json
+      GOOGLE_TOKEN_PATH: /app/data/google_token.json
+      SQLITE_PATH: /app/data/mail_bot.sqlite3
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
+    ports:
+      - "${GMAIL_OAUTH_PORT:-8080}:${GMAIL_OAUTH_PORT:-8080}"
