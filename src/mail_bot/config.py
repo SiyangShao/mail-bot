@@ -81,6 +81,8 @@ class Settings:
     email_retry_max_attempts: int
     email_retry_backoff_seconds: int
     email_retry_max_backoff_seconds: int
+    event_window_days: int
+    event_match_max_open: int
 
     @classmethod
     def from_env(cls, *, require_runtime: bool = True) -> Settings:
@@ -120,6 +122,8 @@ class Settings:
             email_retry_max_attempts=_int_env("EMAIL_RETRY_MAX_ATTEMPTS", 5),
             email_retry_backoff_seconds=_int_env("EMAIL_RETRY_BACKOFF_SECONDS", 300),
             email_retry_max_backoff_seconds=_int_env("EMAIL_RETRY_MAX_BACKOFF_SECONDS", 3600),
+            event_window_days=_int_env("EVENT_WINDOW_DAYS", 7),
+            event_match_max_open=_int_env("EVENT_MATCH_MAX_OPEN", 12),
         )
         settings.validate_common()
         if require_runtime:
@@ -143,6 +147,10 @@ class Settings:
             raise ValueError("EMAIL_RETRY_BACKOFF_SECONDS must be >= 1")
         if self.email_retry_max_backoff_seconds < self.email_retry_backoff_seconds:
             raise ValueError("EMAIL_RETRY_MAX_BACKOFF_SECONDS must be >= EMAIL_RETRY_BACKOFF_SECONDS")
+        if self.event_window_days < 1:
+            raise ValueError("EVENT_WINDOW_DAYS must be >= 1")
+        if self.event_match_max_open < 1:
+            raise ValueError("EVENT_MATCH_MAX_OPEN must be >= 1")
         self.local_timezone()
         self.daily_time_parts()
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from mail_bot.models import EmailAnalysis
-from mail_bot.records import AnalyzedEmail, EmailRecord, StoredEmail
+from mail_bot.records import AnalyzedEmail, EmailRecord, EventSummary, StoredEmail
 from mail_bot.time_utils import iso_utc, parse_iso, utc_now
 
 
@@ -117,11 +117,27 @@ class Database:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_zh TEXT NOT NULL,
+                    context_zh TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT '其他',
+                    importance INTEGER NOT NULL DEFAULT 1,
+                    email_count INTEGER NOT NULL DEFAULT 0,
+                    last_activity_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_events_last_activity
+                    ON events(last_activity_at DESC);
                 """
             )
             _ensure_column(conn, "emails", "suppress_immediate", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "emails", "retry_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "emails", "next_retry_at", "TEXT")
+            _ensure_column(conn, "emails", "event_id", "INTEGER")
 
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
@@ -412,6 +428,114 @@ class Database:
                 (iso_utc(utc_now()), summary_id),
             )
 
+    def create_event(
+        self,
+        *,
+        title_zh: str,
+        context_zh: str,
+        category: str,
+        importance: int,
+        last_activity_at: datetime,
+    ) -> int:
+        now = iso_utc(utc_now())
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO events (
+                    title_zh, context_zh, category, importance, email_count,
+                    last_activity_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    title_zh,
+                    context_zh,
+                    category,
+                    importance,
+                    iso_utc(last_activity_at),
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            return int(row["id"])
+
+    def update_event(
+        self,
+        event_id: int,
+        *,
+        title_zh: str | None = None,
+        context_zh: str,
+        category: str | None = None,
+        importance: int,
+        last_activity_at: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE events
+                SET title_zh = COALESCE(?, title_zh),
+                    context_zh = ?,
+                    category = COALESCE(?, category),
+                    importance = MAX(importance, ?),
+                    email_count = email_count + 1,
+                    last_activity_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    title_zh,
+                    context_zh,
+                    category,
+                    importance,
+                    iso_utc(last_activity_at),
+                    iso_utc(utc_now()),
+                    event_id,
+                ),
+            )
+
+    def link_email_event(self, email_id: int, event_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE emails SET event_id = ?, updated_at = ? WHERE id = ?",
+                (event_id, iso_utc(utc_now()), email_id),
+            )
+
+    def list_open_events(
+        self,
+        *,
+        within_days: int,
+        limit: int,
+        now: datetime | None = None,
+    ) -> list[EventSummary]:
+        cutoff = iso_utc((now or utc_now()) - timedelta(days=within_days))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, title_zh, context_zh, category, importance,
+                       email_count, last_activity_at
+                FROM events
+                WHERE last_activity_at >= ?
+                ORDER BY last_activity_at DESC
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+            return [self._event_from_row(row) for row in rows]
+
+    def get_event(self, event_id: int) -> EventSummary | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, title_zh, context_zh, category, importance,
+                       email_count, last_activity_at
+                FROM events
+                WHERE id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+            return self._event_from_row(row) if row else None
+
     def list_recent(self, limit: int) -> list[AnalyzedEmail]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -557,6 +681,17 @@ class Database:
             "confidence": row["confidence"] or 0,
         }
         return EmailAnalysis.model_validate(payload)
+
+    def _event_from_row(self, row: sqlite3.Row) -> EventSummary:
+        return EventSummary(
+            id=int(row["id"]),
+            title_zh=str(row["title_zh"]),
+            context_zh=str(row["context_zh"]),
+            category=str(row["category"]),
+            importance=int(row["importance"]),
+            email_count=int(row["email_count"]),
+            last_activity_at=parse_iso(str(row["last_activity_at"])),
+        )
 
     def _analyzed_from_joined_row(self, row: sqlite3.Row) -> AnalyzedEmail:
         return AnalyzedEmail(

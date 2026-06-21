@@ -8,7 +8,11 @@ from datetime import timedelta
 
 from mail_bot.config import Settings
 from mail_bot.db import Database
-from mail_bot.formatters import format_daily_summary, format_immediate_email
+from mail_bot.formatters import (
+    format_daily_event,
+    format_daily_overview,
+    format_immediate_email,
+)
 from mail_bot.gmail import (
     GmailClient,
     GmailHistoryExpiredError,
@@ -17,6 +21,7 @@ from mail_bot.gmail import (
     message_received_at,
 )
 from mail_bot.llm import LLMClient
+from mail_bot.models import DailyEvent, EventMatch
 from mail_bot.records import AnalyzedEmail, EmailRecord
 from mail_bot.redaction import Redactor
 from mail_bot.time_utils import iso_utc, utc_now
@@ -191,8 +196,31 @@ class MailBotService:
                 llm_json=summary.model_dump_json(),
                 status="created",
             )
-            text = format_daily_summary(start=start, end=end, summary=summary, emails=emails)
-            message_ids = await self.telegram.send(text, disable_notification=False)
+            emails_by_id = {email.email_id: email for email in emails}
+            if summary.events:
+                events = list(summary.events)
+                assigned = {eid for event in events for eid in event.email_ids}
+                events.extend(
+                    _events_from_emails(
+                        [email for email in emails if email.email_id not in assigned]
+                    )
+                )
+            else:
+                events = _events_from_emails(emails)
+            overview = format_daily_overview(
+                start=start, end=end, summary=summary, event_count=len(events)
+            )
+            message_ids = await self.telegram.send(overview, disable_notification=False)
+            for index, event in enumerate(events, start=1):
+                text = format_daily_event(
+                    index=index,
+                    total=len(events),
+                    event=event,
+                    emails_by_id=emails_by_id,
+                )
+                message_ids.extend(
+                    await self.telegram.send(text, disable_notification=True)
+                )
             self.db.mark_daily_summary_sent(summary_id)
             self.db.record_notification(
                 notification_type="manual_daily" if manual else "daily",
@@ -274,7 +302,15 @@ class MailBotService:
             return
         if self.db.has_notification(email_id=item.email_id, notification_type="immediate"):
             return
-        text = format_immediate_email(item)
+        match = await self._resolve_event(item)
+        is_new_event = match.matched_event_id is None
+        text = format_immediate_email(
+            item,
+            event_title=match.title_zh,
+            event_context=match.context_zh,
+            update_note=match.update_note_zh,
+            is_new_event=is_new_event,
+        )
         try:
             message_ids = await self.telegram.send(text, disable_notification=True)
             self.db.record_notification(
@@ -294,6 +330,59 @@ class MailBotService:
                 status="error",
                 error=str(exc),
             )
+
+    async def _resolve_event(self, item: AnalyzedEmail) -> EventMatch:
+        analysis = item.analysis
+        open_events = self.db.list_open_events(
+            within_days=self.settings.event_window_days,
+            limit=self.settings.event_match_max_open,
+        )
+        match = await self.llm.resolve_event(
+            subject=item.sanitized_subject,
+            from_domain=item.from_domain,
+            received_at=item.received_at.isoformat(),
+            summary_zh=analysis.summary_zh,
+            action_items=analysis.action_items,
+            key_dates=analysis.key_dates,
+            importance=analysis.importance,
+            open_events=open_events,
+        )
+        valid_ids = {event.id for event in open_events}
+        matched_id = match.matched_event_id if match.matched_event_id in valid_ids else None
+        if matched_id is not None:
+            self.db.update_event(
+                matched_id,
+                title_zh=match.title_zh,
+                context_zh=match.context_zh,
+                category=match.category,
+                importance=match.importance,
+                last_activity_at=item.received_at,
+            )
+            event_id = matched_id
+        else:
+            event_id = self.db.create_event(
+                title_zh=match.title_zh,
+                context_zh=match.context_zh,
+                category=match.category,
+                importance=match.importance,
+                last_activity_at=item.received_at,
+            )
+        self.db.link_email_event(item.email_id, event_id)
+        return match.model_copy(update={"matched_event_id": matched_id})
+
+
+def _events_from_emails(emails: list[AnalyzedEmail]) -> list[DailyEvent]:
+    return [
+        DailyEvent(
+            title_zh=email.subject.strip() or email.analysis.summary_zh.strip()[:30] or "未命名事件",
+            summary_zh=email.analysis.summary_zh,
+            importance=email.analysis.importance,
+            email_ids=[email.email_id],
+            action_items=email.analysis.action_items,
+            key_dates=email.analysis.key_dates,
+        )
+        for email in emails
+    ]
 
 
 def _hash_value(value: str | None, salt: str) -> str | None:

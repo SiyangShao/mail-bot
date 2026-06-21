@@ -48,10 +48,30 @@ class EmailAnalysis(BaseModel):
         )
 
 
+class DailyEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title_zh: str = Field(description="Chinese title of the event")
+    summary_zh: str = Field(description="Chinese summary that merges all emails of this event")
+    importance: int = Field(default=3, ge=1, le=5)
+    email_ids: list[int] = Field(default_factory=list)
+    action_items: list[str] = Field(default_factory=list)
+    key_dates: list[KeyDate] = Field(default_factory=list)
+
+    @field_validator("title_zh", "summary_zh")
+    @classmethod
+    def not_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("event field must not be empty")
+        return value
+
+
 class DailySummaryOutput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     overview_zh: str
+    events: list[DailyEvent] = Field(default_factory=list)
     priorities_zh: list[str] = Field(default_factory=list)
     risks_zh: list[str] = Field(default_factory=list)
 
@@ -67,6 +87,45 @@ class DailySummaryOutput(BaseModel):
     def fallback(cls) -> DailySummaryOutput:
         return cls(
             overview_zh="LLM 未能生成稳定的日报总览，下面按单封邮件分析结果列出重要邮件。",
+            events=[],
             priorities_zh=[],
             risks_zh=[],
+        )
+
+
+class EventMatch(BaseModel):
+    """Result of matching a new email against existing open events (immediate flow)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    matched_event_id: int | None = Field(
+        default=None, description="Existing event id, or null to start a new event"
+    )
+    title_zh: str = Field(description="Chinese title of the event")
+    context_zh: str = Field(description="Accumulated Chinese context of the event after this email")
+    update_note_zh: str = Field(
+        default="", description="What this email changed relative to the event"
+    )
+    category: str = Field(default="其他")
+    importance: int = Field(default=3, ge=1, le=5)
+    is_fallback: bool = False
+
+    @field_validator("title_zh", "context_zh")
+    @classmethod
+    def not_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("event field must not be empty")
+        return value
+
+    @classmethod
+    def fallback(cls, title_zh: str, context_zh: str, *, importance: int = 3) -> EventMatch:
+        return cls(
+            matched_event_id=None,
+            title_zh=title_zh.strip() or "未命名事件",
+            context_zh=context_zh.strip() or "（无可用概要）",
+            update_note_zh="",
+            category="其他",
+            importance=importance,
+            is_fallback=True,
         )

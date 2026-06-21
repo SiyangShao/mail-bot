@@ -9,8 +9,8 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from mail_bot.config import Settings
-from mail_bot.models import DailySummaryOutput, EmailAnalysis
-from mail_bot.records import AnalyzedEmail
+from mail_bot.models import DailySummaryOutput, EmailAnalysis, EventMatch, KeyDate
+from mail_bot.records import AnalyzedEmail, EventSummary
 
 LOGGER = logging.getLogger(__name__)
 
@@ -81,7 +81,58 @@ class LLMClient:
             user=user,
             validator=DailySummaryOutput,
             fallback=lambda reason: DailySummaryOutput.fallback(),
-            max_tokens=1400,
+            max_tokens=1600,
+        )
+
+    async def resolve_event(
+        self,
+        *,
+        subject: str,
+        from_domain: str | None,
+        received_at: str,
+        summary_zh: str,
+        action_items: list[str],
+        key_dates: list[KeyDate],
+        importance: int,
+        open_events: list[EventSummary],
+    ) -> EventMatch:
+        events_payload = [
+            {
+                "event_id": event.id,
+                "title_zh": event.title_zh,
+                "context_zh": event.context_zh,
+                "category": event.category,
+                "importance": event.importance,
+                "email_count": event.email_count,
+                "last_activity_at": event.last_activity_at.isoformat(),
+            }
+            for event in open_events
+        ]
+        email_payload = {
+            "subject_redacted": subject,
+            "from_domain": from_domain,
+            "received_at": received_at,
+            "importance": importance,
+            "summary_zh": summary_zh,
+            "action_items": action_items,
+            "key_dates": [date.model_dump() for date in key_dates],
+        }
+        system = _event_system_prompt()
+        user = (
+            "现有的开放事件（可能为空）：\n"
+            + json.dumps(events_payload, ensure_ascii=False)
+            + "\n\n这封新邮件的脱敏分析：\n"
+            + json.dumps(email_payload, ensure_ascii=False)
+            + "\n\n请判断这封邮件是否属于上面某个事件，并输出 JSON。"
+        )
+        return await self._request_validated(
+            system=system,
+            user=user,
+            validator=EventMatch,
+            fallback=lambda reason: EventMatch.fallback(
+                subject, summary_zh, importance=importance
+            ),
+            max_tokens=900,
         )
 
     async def _request_validated(
@@ -89,7 +140,7 @@ class LLMClient:
         *,
         system: str,
         user: str,
-        validator: type[EmailAnalysis] | type[DailySummaryOutput],
+        validator: type[EmailAnalysis] | type[DailySummaryOutput] | type[EventMatch],
         fallback,
         max_tokens: int,
     ):
@@ -234,14 +285,55 @@ body:
 
 def _daily_system_prompt() -> str:
     return """
-你是个人邮件日报助手。输入是过去 24 小时内重要邮件的结构化分析，内容已经脱敏。
-请只输出一个合法 JSON object，不要 Markdown，不要解释。
-输出必须使用简体中文。
+你是个人邮件日报助手。输入是过去 24 小时内重要邮件的结构化分析（JSON 数组，已脱敏），
+每条带有唯一的 email_id。
+
+你的核心任务：把描述同一件事的多封邮件合并成一个“事件”。
+判断是否同一事件时，综合主题、发件域名、概要内容、时间线、待办与日期，
+而不是只看是否同一封邮件的回复。例如：同一次行程的预订确认+航班变更+值机提醒应合并为一个事件；
+同一笔账单的账单+缴费确认应合并为一个事件。
+每个 email_id 必须且只能归入一个事件。
+
+请只输出一个合法 JSON object，不要 Markdown，不要解释。输出必须使用简体中文。
 
 JSON schema:
 {
-  "overview_zh": "总体总结，2-5 句",
-  "priorities_zh": ["最值得优先处理的事项，中文，最多 5 条"],
+  "overview_zh": "对这段时间所有事件的总体总结，2-5 句",
+  "events": [
+    {
+      "title_zh": "事件简短标题",
+      "summary_zh": "合并该事件全部邮件后的概要：背景 + 最新进展，2-4 句",
+      "importance": 1-5 的整数，取该事件内邮件的最高重要性,
+      "email_ids": [属于该事件的 email_id 列表，至少一个],
+      "action_items": ["该事件需要处理的中文待办，没有则空数组"],
+      "key_dates": [{"date": "原文日期或时间表达", "description_zh": "中文说明"}]
+    }
+  ],
   "risks_zh": ["潜在风险或容易错过的时间点，中文，没有则空数组"]
+}
+
+事件按 importance 从高到低排序。
+""".strip()
+
+
+def _event_system_prompt() -> str:
+    return """
+你负责把一封新邮件归入“事件”。一个事件代表同一件现实事务，可能横跨多封邮件、
+甚至不同的邮件会话。输入是若干现有开放事件（含累计 context）和一封新邮件的脱敏分析。
+
+请判断这封新邮件是属于某个已有事件，还是开启一个新事件：
+- 综合主题、发件域名、概要、待办、日期与时间线来判断，而不是只看是否同一会话。
+- 若属于已有事件，matched_event_id 填该事件的 event_id；否则填 null。
+
+请只输出一个合法 JSON object，不要 Markdown，不要解释。输出必须使用简体中文。
+
+JSON schema:
+{
+  "matched_event_id": 已有事件的整数 id，或 null 表示新事件,
+  "title_zh": "事件标题（沿用或优化已有标题）",
+  "context_zh": "纳入这封邮件后，该事件的最新累计背景，2-4 句",
+  "update_note_zh": "这封邮件相对该事件带来的新增/变化；新事件可留空字符串",
+  "category": "账单/安全/工作/旅行/购物/社交/通知/其他 等短分类",
+  "importance": 1-5 的整数，取事件整体的最高重要性
 }
 """.strip()

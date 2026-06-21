@@ -42,6 +42,17 @@ class StoredEmail:
 
 
 @dataclass(frozen=True)
+class EventSummary:
+    id: int
+    title_zh: str
+    context_zh: str
+    category: str
+    importance: int
+    email_count: int
+    last_activity_at: datetime
+
+
+@dataclass(frozen=True)
 class AnalyzedEmail:
     email_id: int
     gmail_id: str

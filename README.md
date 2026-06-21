@@ -10,7 +10,9 @@
 - LLM 输出按“不可靠 JSON”处理：JSON mode 只是辅助，代码会抽取 JSON、用 Pydantic 校验、把错误回传重试，最后给出保守 fallback。
 - SQLite 保存原始标题、Gmail ID、脱敏正文和结构化分析；不保存原始正文或原始 MIME。
 - 重要且信息量大的邮件会立刻 Telegram 提醒，但 `disable_notification=true`。
-- 每天 09:00 总结过去 24 小时重要邮件，Telegram 通知打开。
+- 事件聚合：把描述同一件事的多封邮件合并成一个“事件”。即时提醒会让 LLM 判断这封邮件是否属于某个最近的开放事件，如果是就展示事件背景 + 本次更新；否则新建事件。窗口和数量由 `EVENT_WINDOW_DAYS=7`、`EVENT_MATCH_MAX_OPEN=12` 控制。
+- 每天 09:00 总结过去 24 小时重要邮件：LLM 先把邮件按事件聚类，再每个事件单独发一条 Telegram 消息（先发一条总览），Telegram 通知打开。
+- 所有 Telegram 消息使用 Telegram 支持的 HTML 富文本（加粗 + 斜体）。
 
 ## 1. 准备 Telegram
 
