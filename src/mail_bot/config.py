@@ -94,6 +94,7 @@ class Settings:
     web_password: str | None = None
     web_session_secret: str | None = None
     web_port: int = 8000
+    web_stream_poll_seconds: int = 3
     cf_access_team_domain: str | None = None
     cf_access_aud: str | None = None
 
@@ -144,6 +145,7 @@ class Settings:
             web_password=_env("WEB_PASSWORD"),
             web_session_secret=_env("WEB_SESSION_SECRET"),
             web_port=_int_env("WEB_PORT", 8000),
+            web_stream_poll_seconds=_int_env("WEB_STREAM_POLL_SECONDS", 3),
             cf_access_team_domain=_env("CF_ACCESS_TEAM_DOMAIN"),
             cf_access_aud=_env("CF_ACCESS_AUD"),
         )
@@ -183,6 +185,8 @@ class Settings:
             raise ValueError("DONE_AUTO_HIDE_DAYS must be >= 1")
         if not (1 <= self.web_port <= 65535):
             raise ValueError("WEB_PORT must be in 1..65535")
+        if self.web_stream_poll_seconds < 1:
+            raise ValueError("WEB_STREAM_POLL_SECONDS must be >= 1")
         self.local_timezone()
         self.daily_time_parts()
 

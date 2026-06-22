@@ -104,13 +104,16 @@ function bind(selector, handler) {
   });
 }
 
-function initActions() {
+function initArchive() {
   bind(".archive-btn", async (btn) => {
     const archived = btn.dataset.archived === "true";
     await postJSON(`/api/event/${btn.dataset.id}/archive`, { archived: !archived });
     location.reload();
   });
+}
 
+// Event-detail page actions; no-ops on the board page.
+function initEventActions() {
   const reBtn = document.getElementById("reaggregate");
   if (reBtn) {
     reBtn.addEventListener("click", async () => {
@@ -156,6 +159,91 @@ function initActions() {
   });
 }
 
-initDragDrop();
-initPriority();
-initActions();
+// --- Live board (SSE push, in-place refresh) --------------------------------
+// Board-scoped bindings; re-run after each fragment swap since the swapped-in
+// nodes are brand new (and thus carry no listeners).
+function initBoardInteractions() {
+  initDragDrop();
+  initPriority();
+  initArchive();
+}
+
+function initLiveBoard() {
+  const board = document.querySelector(".board");
+  if (!board || typeof EventSource === "undefined") return;
+
+  const RETRY_MS = 5000;
+  let appliedRev = board.dataset.rev || "";
+  let targetRev = appliedRev;
+  let busy = false;
+  let pending = false;
+  let retryTimer = null;
+
+  function scheduleRetry() {
+    // The stream only re-emits when the revision changes, so a failed refresh
+    // would otherwise stay stale until the next DB write. Retry on a backoff.
+    if (retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      applyRefresh();
+    }, RETRY_MS);
+  }
+
+  async function applyRefresh() {
+    // Never interrupt an in-progress drag; retry once it ends (see dragend below).
+    if (busy || document.querySelector(".dragging")) {
+      pending = true;
+      return;
+    }
+    busy = true;
+    pending = false;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    const wanted = targetRev;
+    let ok = false;
+    try {
+      const sh = new URLSearchParams(location.search).get("show_hidden");
+      const url = "/api/board/fragment" + (sh ? `?show_hidden=${encodeURIComponent(sh)}` : "");
+      const resp = await fetch(url, { credentials: "same-origin" });
+      if (resp.ok) {
+        board.innerHTML = await resp.text();
+        initBoardInteractions();
+        appliedRev = wanted;
+        ok = true;
+      }
+    } catch (_) {
+      // transient network blip — keep the stale board
+    } finally {
+      busy = false;
+      if (pending) {
+        applyRefresh(); // a newer change arrived mid-refresh
+      } else if (!ok && targetRev !== appliedRev) {
+        scheduleRetry(); // refresh failed and we're still behind
+      }
+    }
+  }
+
+  const es = new EventSource("/api/board/stream");
+  es.addEventListener("board", (e) => {
+    targetRev = e.data;
+    if (targetRev !== appliedRev) applyRefresh();
+  });
+  // EventSource auto-reconnects on error; nothing to do.
+
+  document.addEventListener("dragend", () => {
+    if (pending) applyRefresh();
+  });
+  window.addEventListener("pagehide", () => es.close());
+}
+
+if (document.querySelector(".board")) {
+  // Board page: drag/priority/archive are re-bound on every fragment swap.
+  initBoardInteractions();
+  initLiveBoard();
+} else {
+  // Other pages (e.g. event detail) carry a standalone archive button.
+  initArchive();
+}
+initEventActions();

@@ -672,6 +672,20 @@ class Database:
             rows = conn.execute(query, params).fetchall()
             return [self._event_from_row(row) for row in rows]
 
+    def board_revision(self) -> str:
+        """Cheap fingerprint of board state; changes whenever any event is written.
+
+        ``updated_at`` is bumped on every relevant mutation (new email linked,
+        new event, reorder, edit, archive), so ``COUNT + MAX(updated_at)`` is a
+        reliable change token for the live-refresh stream. Not a counter — it is
+        a snapshot of current state, so it never grows unbounded.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS m FROM events"
+            ).fetchone()
+        return f"{row['n']}:{row['m']}"
+
     def list_emails_for_event(self, event_id: int) -> list[AnalyzedEmail]:
         with self.connect() as conn:
             rows = conn.execute(

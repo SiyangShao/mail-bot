@@ -123,6 +123,48 @@ def test_merge_relinks_emails_and_drops_source(client: TestClient, db: Database)
     assert any(m.email_id == email_id for m in moved)
 
 
+def test_board_revision_changes_on_write(db: Database) -> None:
+    rev0 = db.board_revision()
+    event_id = _seed_event(db, title="版本事件")
+    rev1 = db.board_revision()
+    assert rev1 != rev0  # new event changes the fingerprint
+    db.edit_event_fields(event_id, priority="P0")
+    assert db.board_revision() != rev1  # an edit also changes it
+
+
+def test_board_page_exposes_revision(client: TestClient, db: Database) -> None:
+    _seed_event(db, title="带版本号")
+    _login(client)
+    resp = client.get("/", headers=HTML)
+    assert resp.status_code == 200
+    assert 'data-rev="' in resp.text
+
+
+def test_board_fragment_returns_columns(client: TestClient, db: Database) -> None:
+    _seed_event(db, title="片段事件", status="todo")
+    # Requires auth like the rest of /api.
+    assert client.get("/api/board/fragment").status_code == 401
+    _login(client)
+    resp = client.get("/api/board/fragment")
+    assert resp.status_code == 200
+    assert "片段事件" in resp.text
+    # Fragment is the columns only — no full-page chrome.
+    assert "<html" not in resp.text
+
+
+def test_board_fragment_respects_show_hidden(client: TestClient, db: Database) -> None:
+    event_id = _seed_event(db, title="归档片段", status="todo")
+    db.set_event_archived(event_id, True)
+    _login(client)
+    assert "归档片段" not in client.get("/api/board/fragment").text
+    assert "归档片段" in client.get("/api/board/fragment?show_hidden=1").text
+
+
+def test_board_stream_requires_auth(client: TestClient) -> None:
+    # Auth middleware rejects before the stream starts, so this returns promptly.
+    assert client.get("/api/board/stream").status_code == 401
+
+
 def test_split_email_creates_new_event(client: TestClient, db: Database) -> None:
     event_id = _seed_event(db, title="含两封邮件")
     e1 = _insert_linked_email(db, "g1", event_id)

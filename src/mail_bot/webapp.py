@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from datetime import datetime
@@ -8,7 +9,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -111,30 +118,52 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/", response_class=HTMLResponse)
     async def board(request: Request) -> Response:
         db: Database = request.app.state.db
-        settings: Settings = request.app.state.settings
-        show_hidden = request.query_params.get("show_hidden") in {"1", "true", "yes"}
-        events = db.list_board_events(
-            hide_done_after_days=settings.done_auto_hide_days,
-            include_hidden=show_hidden,
-        )
-        tz = request.app.state.tz
-        columns = [
-            {
-                "key": key,
-                "label": label,
-                "events": [_event_view(ev, tz) for ev in events if ev.status == key],
-            }
-            for key, label in STATUSES
-        ]
+        show_hidden = _show_hidden(request)
         return _render(
             request,
             "board.html",
             {
-                "columns": columns,
+                "columns": _board_columns(request, show_hidden),
                 "show_hidden": show_hidden,
                 "priorities": PRIORITIES,
                 "priority_labels": PRIORITY_LABELS,
+                "board_rev": db.board_revision(),
             },
+        )
+
+    @app.get("/api/board/fragment", response_class=HTMLResponse)
+    async def board_fragment(request: Request) -> Response:
+        show_hidden = _show_hidden(request)
+        return _render(
+            request,
+            "_board_columns.html",
+            {
+                "columns": _board_columns(request, show_hidden),
+                "priorities": PRIORITIES,
+                "priority_labels": PRIORITY_LABELS,
+            },
+        )
+
+    @app.get("/api/board/stream")
+    async def board_stream(request: Request) -> Response:
+        db: Database = request.app.state.db
+        settings: Settings = request.app.state.settings
+
+        async def gen():
+            last: str | None = None
+            while not await request.is_disconnected():
+                rev = await run_in_threadpool(db.board_revision)
+                if rev != last:
+                    last = rev
+                    yield f"event: board\ndata: {rev}\n\n"
+                else:
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(settings.web_stream_poll_seconds)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @app.get("/event/{event_id}", response_class=HTMLResponse)
@@ -263,6 +292,28 @@ def _render(request: Request, name: str, context: dict[str, Any], status_code: i
     return templates.TemplateResponse(
         request=request, name=name, context=context, status_code=status_code
     )
+
+
+def _show_hidden(request: Request) -> bool:
+    return request.query_params.get("show_hidden") in {"1", "true", "yes"}
+
+
+def _board_columns(request: Request, show_hidden: bool) -> list[dict[str, Any]]:
+    db: Database = request.app.state.db
+    settings: Settings = request.app.state.settings
+    tz = request.app.state.tz
+    events = db.list_board_events(
+        hide_done_after_days=settings.done_auto_hide_days,
+        include_hidden=show_hidden,
+    )
+    return [
+        {
+            "key": key,
+            "label": label,
+            "events": [_event_view(ev, tz) for ev in events if ev.status == key],
+        }
+        for key, label in STATUSES
+    ]
 
 
 def _get_llm(request: Request) -> LLMClient | None:
